@@ -1,0 +1,107 @@
+version: 2.1
+
+orbs:
+  aws-cli: circleci/aws-cli@1.4.0
+  aws-ecr: circleci/aws-ecr@6.15.3
+  aws-eks: circleci/aws-eks@0.2.7
+  node: circleci/node@4.2.0
+
+executors:
+  node:
+    docker:
+      - auth:
+          password: $DOCKERHUB_PASSWORD
+          username: $DOCKERHUB_USERNAME
+        image: cimg/node:14.16.0
+
+jobs:
+  test:
+    docker:
+      - auth:
+          password: $DOCKERHUB_PASSWORD
+          username: $DOCKERHUB_USERNAME
+        image: cimg/node:14.16.0
+      - auth:
+          password: $DOCKERHUB_PASSWORD
+          username: $DOCKERHUB_USERNAME
+        image: circleci/mongo:bionic
+    environment:
+      PORT: 3000
+      MONGODB_URL: mongodb://localhost:27017/todo-app
+      JWT_SECRET: myjwtsecret
+    steps:
+      - checkout
+      - node/install-packages:
+          pkg-manager: npm
+          app-dir: ./app/client
+      - run:
+          name: Test the client
+          command: cd ./app/client && npm run test
+      - node/install-packages:
+          pkg-manager: npm
+          app-dir: ./app/server
+      - run:
+          name: Test the server
+          command: cd ./app/server && npm run test
+
+  build:
+    executor:
+      name: aws-ecr/default
+      image: ubuntu-1604:202007-01
+      use-docker-layer-caching: true
+    steps:
+      - checkout
+      - run:
+          name: Login to hub.docker.com
+          command: echo ${DOCKERHUB_PASSWORD} | docker login --username ${DOCKERHUB_USERNAME} --password-stdin
+      - aws-ecr/build-and-push-image:
+          # Docker
+          dockerfile: Dockerfile
+          extra-build-args: --progress=plain --secret id=npm,src=$HOME/.npmrc
+          # AWS ECR
+          account-url: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          repo: "${AWS_RESOURCE_NAME_PREFIX}"
+          region: ${AWS_DEFAULT_REGION}
+          tag: ${CIRCLE_SHA1:0:8},latest-${CIRCLE_BRANCH//\//-}
+
+  deploy:
+    steps:
+      - checkout
+      - aws-eks/update-kubeconfig-with-authenticator:
+          aws-region: ${AWS_DEFAULT_REGION}
+          cluster-name: "${AWS_RESOURCE_NAME_PREFIX}-eks-cluster"
+      - run:
+          name: Update helm chart with the new image via helmfile sync
+          command: |
+            helm repo add ${AWS_RESOURCE_NAME_PREFIX} ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${AWS_RESOURCE_NAME_PREFIX} && IMAGE_TAG=${CIRCLE_SHA1:0:8} helmfile --file .k8s/helmfile.yaml --selector name=${AWS_RESOURCE_NAME_PREFIX} sync
+          environment:
+            ENVIRONMENT: production
+
+workflows:
+  version: 2.1
+
+  todo-app:
+    jobs:
+      - test:
+          name: todo-app:test
+          context:
+            - global-production
+            - dockerhub
+      - build:
+          name: todo-app:build
+          context:
+            - global-production
+            - dockerhub
+          filters:
+            branches:
+              only: master
+      - deploy:
+          name: todo-app:deploy
+          context:
+            - global-production
+          filters:
+            branches:
+              only: master
+          requires:
+            - todo-app:test
+            - todo-app:build
