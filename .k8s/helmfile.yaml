@@ -1,0 +1,7 @@
+releases:
+  - name: todo-app
+    chart: todo-app
+    atomic: true
+    values:
+      - todo-app/values.yaml.gotmpl
+      - todo-app/environments/{{ env "ENVIRONMENT" | default "stage" }}/values.yaml.gotmpl
